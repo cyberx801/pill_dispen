@@ -17,7 +17,7 @@
 
 // Buttons & LED
 #define BUTTON_CALIB    7   // SW2 (Calibration)
-#define BUTTON_START    9   // SW0 (Start)
+#define BUTTON_START    9   // SW0 (Start
 #define STATUS_LED      20
 
 // Sensors
