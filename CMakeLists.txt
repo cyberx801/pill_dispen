@@ -24,6 +24,14 @@ add_compile_options(-Wall
 # Tell CMake where to find the executable source file
 add_executable(${PROJECT_NAME} 
     main.c
+        uart.c
+        uart.h
+        circular_queue.c
+        circular_queue.h
+        eeprom.c
+        eeprom.h
+        lora.c
+        lora.h
 )
 
 # Create map/bin/hex/uf2 files
@@ -34,6 +42,9 @@ target_link_libraries(${PROJECT_NAME}
         pico_stdlib
         hardware_pwm
         hardware_gpio
+        hardware_i2c
+        hardware_rtc
+
 )
 
 # Disable usb output, enable uart output
