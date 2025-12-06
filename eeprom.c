@@ -4,10 +4,10 @@
 #include "eeprom.h"
 
 // --- Configuration Constants ---
-#define I2C_BUS         i2c0    // Main.c initializes i2c0
-#define WRITE_DELAY_MS  5       // Required delay for EEPROM write cycle
-#define BLOCK_SIZE      64      // Size of one log entry slot
-#define MEMORY_CAPACITY 2048    // Total size of EEPROM in bytes
+#define I2C_BUS         i2c0
+#define WRITE_DELAY_MS  5
+#define BLOCK_SIZE      64      // Size of one log entry
+#define MEMORY_CAPACITY 1800    // Use only first 1800 bytes for logs (leaves 248 bytes for states)
 #define MAX_TEXT_LEN    61      // Max characters per log
 
 // --- Internal Helper Prototypes ---
@@ -20,18 +20,13 @@ static void locate_next_slot(uint8_t *addr_buffer);
 // -------------------------------------------------------------------------
 
 void eepromWrite(const uint8_t *src_data, size_t byte_count) {
-    // Send data to the I2C bus (Address + Payload)
     i2c_write_blocking(I2C_BUS, MEMORY_ADDR, src_data, byte_count, false);
-    // Wait for the physical write operation to complete
     sleep_ms(WRITE_DELAY_MS);
 }
 
 void eepromRead(const uint8_t *addr_ptr, uint8_t *dest_buf, size_t byte_count) {
-    // Step 1: Write the memory address we want to read from
     i2c_write_blocking(I2C_BUS, MEMORY_ADDR, addr_ptr, 2, true);
     sleep_ms(WRITE_DELAY_MS);
-
-    // Step 2: Read the actual data
     i2c_read_blocking(I2C_BUS, MEMORY_ADDR, dest_buf, byte_count, false);
 }
 
@@ -39,10 +34,6 @@ void eepromRead(const uint8_t *addr_ptr, uint8_t *dest_buf, size_t byte_count) {
 // Log Management Logic
 // -------------------------------------------------------------------------
 
-/**
- * Calculates a 16-bit CRC checksum to ensure data integrity.
- * Used to detect if a log entry is valid or corrupted.
- */
 static uint16_t calc_checksum(const uint8_t *ptr, size_t count) {
     uint16_t crc = 0xFFFF;
     uint8_t temp;
@@ -60,13 +51,11 @@ static uint16_t calc_checksum(const uint8_t *ptr, size_t count) {
     return crc;
 }
 
-/**
- * Wipes the log section by writing 0x00 to the start of every block.
- * Returns 0 on success, 1 on failure.
- */
 static int format_memory(void) {
     uint8_t cmd[3];
-    cmd[2] = 0x00; // Marker for "Empty"
+    cmd[2] = 0x00;
+
+    printf("Formatting EEPROM log area...\n");
 
     // Erase loop
     for (int offset = 0; offset < MEMORY_CAPACITY; offset += BLOCK_SIZE) {
@@ -83,15 +72,15 @@ static int format_memory(void) {
         uint8_t check_val;
         eepromRead(cmd, &check_val, 1);
 
-        if (check_val != 0) return 1; // Formatting failed
+        if (check_val != 0) {
+            printf("Format verification failed at %d\n", offset);
+            return 1;
+        }
     }
-    return 0; // Success
+    printf("Format complete!\n");
+    return 0;
 }
 
-/**
- * Scans memory blocks to find the first empty slot (starting with 0).
- * If memory is full, it triggers a format.
- */
 static void locate_next_slot(uint8_t *addr_buffer) {
     bool slot_found = false;
     uint8_t header_byte;
@@ -111,23 +100,22 @@ static void locate_next_slot(uint8_t *addr_buffer) {
         current_addr += BLOCK_SIZE;
     }
 
-    // If no space, wipe and reset to 0
+    // If no space, wipe and reset
     if (!slot_found) {
-        while(format_memory() != 0); // Retry until success
+        printf("Log memory full, formatting...\n");
+        while(format_memory() != 0);
         addr_buffer[0] = 0x00;
         addr_buffer[1] = 0x00;
     }
 }
 
-/**
- * Main Public Function: Reads logs and prints them.
- */
 void readEELog(void) {
-    printf("\n--- Reading Device Logs ---\n");
+    printf("\n=== Device Log History ===\n");
 
     uint8_t entry_data[BLOCK_SIZE];
     uint8_t cursor[3];
     bool is_empty = true;
+    int log_count = 0;
 
     for (int i = 0; i < MEMORY_CAPACITY; i += BLOCK_SIZE) {
         cursor[0] = (uint8_t)(i >> 8);
@@ -136,19 +124,22 @@ void readEELog(void) {
         // Check if slot is occupied
         eepromRead(cursor, &cursor[2], 1);
 
-        if (cursor[2] != 0) { // Not empty
+        if (cursor[2] != 0) {
             is_empty = false;
 
             // Read the entire block
             eepromRead(cursor, entry_data, BLOCK_SIZE);
 
-            // Find the null terminator to determine string length
+            // Find null terminator
             for (int k = 0; k < (BLOCK_SIZE - 2); k++) {
                 if (entry_data[k] == 0) {
                     // Validate checksum
-                    // Checksum covers message + null terminator
                     if (calc_checksum(entry_data, k + 3) == 0) {
-                        printf("[%d] %s\n", i, entry_data);
+                        printf("[%d] %s\n", log_count, entry_data);
+                        log_count++;
+                    } else {
+                        printf("[%d] <corrupted>\n", log_count);
+                        log_count++;
                     }
                     break;
                 }
@@ -157,46 +148,42 @@ void readEELog(void) {
     }
 
     if (is_empty) {
-        printf("Log is empty.\n");
+        printf("No logs found.\n");
     }
+    printf("=========================\n\n");
 }
 
-/**
- * Main Public Function: Writes a new log entry.
- */
 void writeEELog(const char *message) {
     size_t len = strlen(message);
 
-    // Truncate message if too long
+    // Truncate if too long
     if (len > MAX_TEXT_LEN) {
         len = MAX_TEXT_LEN;
     }
 
-    printf("Writing Log: %s\n", message);
+    printf("LOG: %s\n", message);
 
-    // Packet structure: [AddrH, AddrL, Data..., Null, CRC_H, CRC_L]
+    // Packet: [AddrH, AddrL, Data..., Null, CRC_H, CRC_L]
     size_t total_packet_size = len + 5;
     uint8_t tx_packet[total_packet_size];
     uint8_t crc_buffer[len + 1];
 
-    // 1. Get Address (Fills index 0 and 1 of tx_packet)
+    // Get address
     locate_next_slot(tx_packet);
 
-    // 2. Prepare Data Payload
+    // Prepare data
     memcpy(&tx_packet[2], message, len);
-    tx_packet[len + 2] = '\0'; // Null terminator
+    tx_packet[len + 2] = '\0';
 
-    // 3. Create temp buffer for CRC calc
+    // Compute CRC
     memcpy(crc_buffer, message, len);
     crc_buffer[len] = '\0';
-
-    // 4. Compute CRC
     uint16_t checksum = calc_checksum(crc_buffer, sizeof(crc_buffer));
 
-    // 5. Append CRC to packet
+    // Append CRC
     tx_packet[len + 3] = (uint8_t)(checksum >> 8);
     tx_packet[len + 4] = (uint8_t)(checksum & 0xFF);
 
-    // 6. Write to EEPROM
+    // Write to EEPROM
     eepromWrite(tx_packet, total_packet_size);
 }

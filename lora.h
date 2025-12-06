@@ -1,6 +1,4 @@
-//
-// Created by fozma on 26.11.2025.
-//
+
 
 #ifndef BLINK_LORA_H
 #define BLINK_LORA_H
@@ -28,4 +26,8 @@ bool loraInit(void);
 bool loraMsg(const char *msg, size_t len);
 
 #endif // LORAWAN_H
+
 #endif //BLINK_LORA_H
+
+
+

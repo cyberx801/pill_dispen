@@ -1,5 +1,9 @@
 
 
+#ifndef BLINK_CIRCULAR_QUEUE_H
+#define BLINK_CIRCULAR_QUEUE_H
+
+
 #ifndef BLINK_RING_BUFFER_H
 #define BLINK_RING_BUFFER_H
 #ifndef CIRCULAR_QUEUE_H
@@ -39,3 +43,4 @@ bool queue_is_full(circular_queue_t *q);
 
 #endif // CIRCULAR_QUEUE_H
 #endif //BLINK_RING_BUFFER_H
+#endif //BLINK_CIRCULAR_QUEUE_H

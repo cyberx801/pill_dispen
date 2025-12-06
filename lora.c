@@ -27,7 +27,7 @@ typedef struct {
 static const lora_cmd_t init_sequence[] = {
     {"AT\r\n",                          "+AT: OK",      SHORT_DELAY},
     {"AT+MODE=LWOTAA\r\n",              "+MODE: LWOTAA", SHORT_DELAY},
-    {"AT+KEY=APPKEY,\"\"\r\n", "+KEY: APPKEY", SHORT_DELAY},
+    {"AT+KEY=APPKEY,\"f20ae78e29e379bdc2c166d268a603a6\"\r\n", "+KEY: APPKEY", SHORT_DELAY},
     {"AT+CLASS=A\r\n",                  "+CLASS: A",    SHORT_DELAY},
     {"AT+PORT=8\r\n",                   "+PORT: 8",     SHORT_DELAY},
     {"AT+JOIN\r\n",                     "joined",       JOIN_DELAY}
