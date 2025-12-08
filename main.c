@@ -1414,3 +1414,382 @@ void piezo_handler(uint gpio, uint32_t events) {
         }
     }
 }
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "hardware/watchdog.h"
+
+// pin definitions
+#define MOTOR_1  13
+#define MOTOR_2  6
+#define MOTOR_3  3
+#define MOTOR_4  2
+
+#define SW_CALIB  7    // calibration button
+#define SW_START  9    // start button
+#define LED       20
+
+#define OPTO      28   // optical sensor
+#define PIEZO     27   // piezo sensor
+
+// settings
+#define MOTOR_DELAY  2      // ms between steps
+#define DEBOUNCE     30     // button debounce
+#define WAIT_TIME    30     // seconds between pills
+#define PIEZO_WAIT   500    // wait for pill drop
+
+// state machine states
+typedef enum {
+    WAIT_CALIB,
+    CALIBRATING,
+    WAIT_START,
+    DISPENSING,
+    WAITING_30SEC,
+    DONE
+} state_t;
+
+// motor step sequence (half step)
+const int motor_seq[8][4] = {
+    {1,0,0,0}, {1,1,0,0}, {0,1,0,0}, {0,1,1,0},
+    {0,0,1,0}, {0,0,1,1}, {0,0,0,1}, {1,0,0,1}
+};
+
+// global vars
+state_t current_state = WAIT_CALIB;
+int motor_pos = 0;
+int steps_per_rev = 4096;  // default value
+int current_day = 0;
+volatile bool pill_flag = false;
+uint64_t wait_start_time = 0;
+
+// function prototypes
+void init_pins();
+void led_blink();
+void motor_step(int dir);
+void calibrate();
+void dispense_pill();
+void piezo_isr(uint gpio, uint32_t events);
+void print_debug_info();
+
+// ===========================================================================
+// MAIN
+// ===========================================================================
+int main() {
+    stdio_init_all();
+    sleep_ms(1000);
+
+    printf("\n=== Pill Dispenser Started ===\n");
+
+    init_pins();
+
+    // enable watchdog - 5 second timeout
+    watchdog_enable(5000, false);
+    printf("Watchdog enabled (5 sec)\n");
+
+    // setup piezo interrupt
+    gpio_set_irq_enabled_with_callback(PIEZO, GPIO_IRQ_EDGE_FALL, true, &piezo_isr);
+
+    // main state machine loop
+    while(1) {
+        watchdog_update();  // feed the dog
+
+        switch(current_state) {
+            case WAIT_CALIB:
+                // blink led while waiting
+                led_blink();
+
+                // check calibration button
+                if(!gpio_get(SW_CALIB)) {
+                    sleep_ms(DEBOUNCE);
+                    if(!gpio_get(SW_CALIB)) {
+                        printf("\n[STATE] Calibration button pressed\n");
+                        gpio_put(LED, 1);  // led on
+                        current_state = CALIBRATING;
+                    }
+                }
+                break;
+
+            case CALIBRATING:
+                calibrate();
+                printf("[STATE] Calibration done, waiting for start\n");
+                current_state = WAIT_START;
+                // wait for button release
+                while(!gpio_get(SW_CALIB)) {
+                    watchdog_update();
+                    sleep_ms(10);
+                }
+                break;
+
+            case WAIT_START:
+                // led stays on, wait for start button
+                if(!gpio_get(SW_START)) {
+                    sleep_ms(DEBOUNCE);
+                    if(!gpio_get(SW_START)) {
+                        printf("\n[STATE] Start button pressed\n");
+                        gpio_put(LED, 0);  // led off
+                        current_day = 1;
+                        current_state = DISPENSING;
+                    }
+                }
+                break;
+
+            case DISPENSING:
+                printf("\n--- Day %d ---\n", current_day);
+                dispense_pill();
+
+                if(current_day < 7) {
+                    printf("[STATE] Waiting 30 seconds...\n");
+                    wait_start_time = time_us_64();
+                    current_state = WAITING_30SEC;
+                } else {
+                    printf("[STATE] All 7 pills dispensed!\n");
+                    current_state = DONE;
+                }
+                break;
+
+            case WAITING_30SEC:
+                // check if 30 seconds passed
+                if((time_us_64() - wait_start_time) >= (WAIT_TIME * 1000000ULL)) {
+                    current_day++;
+                    current_state = DISPENSING;
+                }
+                sleep_ms(100);
+                break;
+
+            case DONE:
+                printf("\n=== Cycle Complete ===\n");
+                printf("Starting over...\n\n");
+                current_day = 0;
+                current_state = WAIT_CALIB;
+                sleep_ms(1000);
+                break;
+        }
+
+        sleep_ms(10);
+    }
+
+    return 0;
+}
+
+// ===========================================================================
+// INIT
+// ===========================================================================
+void init_pins() {
+    // motor pins
+    gpio_init(MOTOR_1); gpio_set_dir(MOTOR_1, GPIO_OUT);
+    gpio_init(MOTOR_2); gpio_set_dir(MOTOR_2, GPIO_OUT);
+    gpio_init(MOTOR_3); gpio_set_dir(MOTOR_3, GPIO_OUT);
+    gpio_init(MOTOR_4); gpio_set_dir(MOTOR_4, GPIO_OUT);
+
+    // led
+    gpio_init(LED);
+    gpio_set_dir(LED, GPIO_OUT);
+    gpio_put(LED, 0);
+
+    // buttons (with pullup)
+    gpio_init(SW_CALIB);
+    gpio_set_dir(SW_CALIB, GPIO_IN);
+    gpio_pull_up(SW_CALIB);
+
+    gpio_init(SW_START);
+    gpio_set_dir(SW_START, GPIO_IN);
+    gpio_pull_up(SW_START);
+
+    // sensors (with pullup)
+    gpio_init(OPTO);
+    gpio_set_dir(OPTO, GPIO_IN);
+    gpio_pull_up(OPTO);
+
+    gpio_init(PIEZO);
+    gpio_set_dir(PIEZO, GPIO_IN);
+    gpio_pull_up(PIEZO);
+
+    printf("Pins initialized\n");
+}
+
+// ===========================================================================
+// LED
+// ===========================================================================
+void led_blink() {
+    static uint64_t last_blink = 0;
+    static bool led_state = false;
+
+    if((time_us_64() - last_blink) > 100000) {  // 100ms
+        led_state = !led_state;
+        gpio_put(LED, led_state);
+        last_blink = time_us_64();
+    }
+}
+
+void led_error() {
+    // blink 5 times
+    for(int i=0; i<5; i++) {
+        gpio_put(LED, 1);
+        sleep_ms(300);
+        gpio_put(LED, 0);
+        sleep_ms(300);
+    }
+}
+
+// ===========================================================================
+// MOTOR
+// ===========================================================================
+void motor_step(int dir) {
+    // dir: 1 = forward, -1 = backward
+    if(dir > 0) {
+        motor_pos = (motor_pos + 1) % 8;
+    } else {
+        motor_pos = (motor_pos - 1 + 8) % 8;
+    }
+
+    // apply sequence
+    gpio_put(MOTOR_1, motor_seq[motor_pos][0]);
+    gpio_put(MOTOR_2, motor_seq[motor_pos][1]);
+    gpio_put(MOTOR_3, motor_seq[motor_pos][2]);
+    gpio_put(MOTOR_4, motor_seq[motor_pos][3]);
+
+    sleep_ms(MOTOR_DELAY);
+}
+
+void motor_turn(int steps) {
+    printf("[MOTOR] Turning %d steps\n", steps);
+    for(int i=0; i<steps; i++) {
+        motor_step(1);
+        watchdog_update();  // feed watchdog during long operations
+    }
+}
+
+// ===========================================================================
+// CALIBRATION
+// ===========================================================================
+void calibrate() {
+    printf("\n=== CALIBRATION START ===\n");
+
+    motor_pos = 0;
+
+    // step 1: move until sensor is high
+    printf("[CALIB] Clearing sensor...\n");
+    int count = 0;
+    while(gpio_get(OPTO) == 0 && count < 5000) {
+        motor_step(1);
+        count++;
+        if(count % 500 == 0) watchdog_update();
+    }
+    printf("[CALIB] Sensor cleared after %d steps\n", count);
+
+    // step 2: find falling edge
+    printf("[CALIB] Finding edge...\n");
+    count = 0;
+    while(gpio_get(OPTO) == 1 && count < 5000) {
+        motor_step(1);
+        count++;
+        if(count % 500 == 0) watchdog_update();
+    }
+    printf("[CALIB] Edge found after %d steps\n", count);
+
+    // step 3: measure 3 revolutions
+    printf("[CALIB] Measuring revolutions...\n");
+    int rev_steps[3];
+    int total = 0;
+
+    for(int rev=0; rev<3; rev++) {
+        int steps = 0;
+        bool prev = gpio_get(OPTO);
+
+        // measure one complete revolution
+        while(steps < 10000) {
+            motor_step(1);
+            steps++;
+
+            bool curr = gpio_get(OPTO);
+
+            // detect falling edge
+            if(prev == 1 && curr == 0) {
+                rev_steps[rev] = steps;
+                total += steps;
+                printf("[CALIB] Rev %d: %d steps\n", rev+1, steps);
+                break;
+            }
+
+            prev = curr;
+
+            if(steps % 500 == 0) watchdog_update();
+        }
+    }
+
+    // calculate average
+    steps_per_rev = total / 3;
+    printf("[CALIB] Average: %d steps/rev\n", steps_per_rev);
+
+    // measure hole size for alignment
+    printf("[CALIB] Measuring hole size...\n");
+    int hole_size = 0;
+    while(gpio_get(OPTO) == 0 && hole_size < 1000) {
+        motor_step(1);
+        hole_size++;
+        if(hole_size % 100 == 0) watchdog_update();
+    }
+    printf("[CALIB] Hole size: %d steps\n", hole_size);
+
+    // move back to center
+    int align = hole_size / 2;
+    printf("[CALIB] Aligning (%d steps back)...\n", align);
+    for(int i=0; i<align; i++) {
+        motor_step(-1);
+        if(i % 100 == 0) watchdog_update();
+    }
+
+    printf("=== CALIBRATION COMPLETE ===\n\n");
+}
+
+// ===========================================================================
+// DISPENSE
+// ===========================================================================
+void dispense_pill() {
+    pill_flag = false;  // reset flag
+
+    // turn motor 1/8 revolution
+    int steps = steps_per_rev / 8;
+    printf("[DISPENSE] Moving %d steps\n", steps);
+    motor_turn(steps);
+
+    // wait for pill to drop
+    printf("[DISPENSE] Waiting for pill...\n");
+    sleep_ms(PIEZO_WAIT);
+
+    // check if pill detected
+    if(pill_flag) {
+        printf("[DISPENSE] Pill OK!\n");
+        pill_flag = false;
+    } else {
+        printf("[DISPENSE] ERROR: No pill detected!\n");
+        led_error();
+    }
+
+    // debug info
+    print_debug_info();
+}
+
+// ===========================================================================
+// PIEZO INTERRUPT
+// ===========================================================================
+void piezo_isr(uint gpio, uint32_t events) {
+    // simple debounce - ignore if already detected
+    if(!pill_flag) {
+        pill_flag = true;
+        printf("[IRQ] Pill drop detected\n");
+    }
+}
+
+// ===========================================================================
+// DEBUG
+// ===========================================================================
+void print_debug_info() {
+    printf("\n--- DEBUG INFO ---\n");
+    printf("State: %d\n", current_state);
+    printf("Day: %d/7\n", current_day);
+    printf("Motor pos: %d\n", motor_pos);
+    printf("Steps/rev: %d\n", steps_per_rev);
+    printf("Opto: %d\n", gpio_get(OPTO));
+    printf("Piezo: %d\n", gpio_get(PIEZO));
+    printf("------------------\n\n");
+}*/
